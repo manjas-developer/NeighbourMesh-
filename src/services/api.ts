@@ -37,6 +37,32 @@ export async function fetchAppConfig(): Promise<{ googleMapsApiKey: string }> {
   return (await res.json()) as { googleMapsApiKey: string };
 }
 
+export async function reverseGeocodeLocation(
+  lat: number,
+  lng: number
+): Promise<{ label: string; formattedAddress: string }> {
+  const res = await fetch(
+    `/api/maps/reverse-geocode?lat=${encodeURIComponent(String(lat))}&lng=${encodeURIComponent(
+      String(lng)
+    )}`
+  );
+  if (res.status === 429) {
+    window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+  }
+  const data = (await res.json().catch(() => ({}))) as {
+    label?: string;
+    formattedAddress?: string;
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data.error || 'Unable to resolve neighborhood name.');
+  }
+  return {
+    label: data.label || `${lat.toFixed(3)}, ${lng.toFixed(3)}`,
+    formattedAddress: data.formattedAddress || `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+  };
+}
+
 export async function transcribeAudio(
   audioBase64: string,
   mimeType: string

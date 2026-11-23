@@ -1,39 +1,51 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   CheckCircle2,
   Loader2,
+  MapPin,
+  Navigation,
   ShieldAlert,
   ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react';
 import { structurePost } from '../services/api';
-import { MeshItem, StructuredPostDraft } from '../types/mesh';
+import {
+  LatLng,
+  LiveLocationState,
+  MeshItem,
+  RealNearbyPlace,
+  StructuredPostDraft,
+} from '../types/mesh';
 import { VoiceRecorderButton } from './VoiceRecorderButton';
 
 interface PostComposerModalProps {
   isOpen: boolean;
   onClose: () => void;
   onPublish: (item: MeshItem, autoMatchQuery?: string) => void;
+  center: LatLng;
+  areaLabel: string;
+  liveLocation: LiveLocationState;
+  onEnableLiveLocation: () => void;
+  realPlaces: RealNearbyPlace[];
+  preselectedPlace?: RealNearbyPlace | null;
 }
-
-const PRIVACY_ZONES = [
-  { label: 'North Oak Block (~300m zone)', offsetLat: 0.0038, offsetLng: -0.0024, radius: 300 },
-  { label: 'Maple Crossing (~280m zone)', offsetLat: 0.0019, offsetLng: -0.0011, radius: 280 },
-  { label: 'Cedar Park Sector (~350m zone)', offsetLat: -0.0031, offsetLng: 0.0039, radius: 350 },
-  { label: 'West Pine Corridor (~400m zone)', offsetLat: -0.0015, offsetLng: -0.0062, radius: 400 },
-  { label: 'Library Commons (~260m zone)', offsetLat: -0.0014, offsetLng: -0.0041, radius: 260 },
-];
 
 export const PostComposerModal: React.FC<PostComposerModalProps> = ({
   isOpen,
   onClose,
   onPublish,
+  center,
+  areaLabel,
+  liveLocation,
+  onEnableLiveLocation,
+  realPlaces,
+  preselectedPlace,
 }) => {
   const [rawText, setRawText] = useState('');
   const [authorName, setAuthorName] = useState('Jordan Lee');
-  const [selectedZoneIdx, setSelectedZoneIdx] = useState(0);
+  const [selectedLocationValue, setSelectedLocationValue] = useState<string>('current-zone');
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [photoBase64, setPhotoBase64] = useState<string | undefined>(undefined);
   const [photoMime, setPhotoMime] = useState<string | undefined>(undefined);
@@ -44,7 +56,23 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  useEffect(() => {
+    if (isOpen && preselectedPlace) {
+      setSelectedLocationValue(`place:${preselectedPlace.id}`);
+    } else if (isOpen && !preselectedPlace) {
+      setSelectedLocationValue('current-zone');
+    }
+  }, [isOpen, preselectedPlace]);
+
   if (!isOpen) return null;
+
+  const chosenRealPlace =
+    selectedLocationValue.startsWith('place:')
+      ? realPlaces.find((p) => `place:${p.id}` === selectedLocationValue) ??
+        (preselectedPlace && `place:${preselectedPlace.id}` === selectedLocationValue
+          ? preselectedPlace
+          : null)
+      : null;
 
   const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -88,9 +116,27 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
 
   const handleConfirmPublish = () => {
     if (!draft || !draft.approved) return;
-    const zone = PRIVACY_ZONES[selectedZoneIdx] ?? PRIVACY_ZONES[0];
-    const jitterLat = (Math.random() - 0.5) * 0.0012;
-    const jitterLng = (Math.random() - 0.5) * 0.0012;
+
+    let zoneLabel = `${areaLabel} (~300m fuzzy zone)`;
+    let offsetLat = (Math.random() - 0.5) * 0.0024;
+    let offsetLng = (Math.random() - 0.5) * 0.0024;
+    let radiusMeters = 300;
+    const handoffSteps = [...draft.safeHandoffSteps];
+
+    if (chosenRealPlace) {
+      zoneLabel = `Near ${chosenRealPlace.name} (${chosenRealPlace.category})`;
+      offsetLat = chosenRealPlace.location.lat - center.lat;
+      offsetLng = chosenRealPlace.location.lng - center.lng;
+      radiusMeters = 250;
+      handoffSteps.unshift(
+        `Public meetup spot: ${chosenRealPlace.name} (${chosenRealPlace.address}).`
+      );
+    } else if (liveLocation.coords) {
+      zoneLabel = `${areaLabel} · Live GPS Zone (~300m)`;
+      offsetLat = liveLocation.coords.lat - center.lat + (Math.random() - 0.5) * 0.0012;
+      offsetLng = liveLocation.coords.lng - center.lng + (Math.random() - 0.5) * 0.0012;
+      radiusMeters = 300;
+    }
 
     const newItem: MeshItem = {
       id: `mesh-${Date.now()}`,
@@ -107,19 +153,19 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
       description: draft.cleanedDescription,
       category: draft.category,
       urgency: draft.urgency,
-      authorName: authorName.trim() || 'Oakwood Resident',
-      authorRole: 'Verified Neighbor',
-      zoneLabel: zone.label,
-      offsetLat: zone.offsetLat + jitterLat,
-      offsetLng: zone.offsetLng + jitterLng,
-      radiusMeters: zone.radius,
+      authorName: authorName.trim() || 'Resident',
+      authorRole: liveLocation.isTracking ? 'Verified Live Neighbor' : 'Verified Neighbor',
+      zoneLabel,
+      offsetLat,
+      offsetLng,
+      radiusMeters,
       availability: draft.timeWindow,
       createdAtLabel: 'Just now',
       originalLanguage: 'English',
       tags: draft.tags,
       imageUrl: photoPreview || undefined,
       imageAlt: draft.title,
-      safeHandoffSteps: draft.safeHandoffSteps,
+      safeHandoffSteps: handoffSteps,
       moderationNote: draft.moderationNote,
       reportsCount: draft.postType === 'issue' ? 1 : undefined,
       isEmergencyRelevant:
@@ -132,7 +178,6 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
       draft.postType === 'need' ? `${draft.title}. ${draft.cleanedDescription}` : undefined
     );
 
-    // Reset state
     setRawText('');
     setPhotoPreview(null);
     setPhotoBase64(undefined);
@@ -157,7 +202,7 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
               Post a Need, Share a Resource, or Report an Issue
             </h2>
             <p className="text-xs text-[#52605A] mt-0.5">
-              Type in any language, speak with your microphone, or snap a photo. Gemini categorizes and checks safety automatically.
+              Anchored to your real neighborhood ({areaLabel}) or a nearby public meetup place—without exposing your street number.
             </p>
           </div>
           <button
@@ -183,23 +228,56 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
               />
             </label>
 
-            <label className="block">
-              <span className="text-xs font-medium text-[#13201B]">
-                Fuzzy Privacy Zone (No Street Address)
-              </span>
+            <div className="block">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-[#13201B]">
+                  Live Zone or Safe Meetup Place
+                </span>
+                {!liveLocation.isTracking && (
+                  <button
+                    type="button"
+                    onClick={onEnableLiveLocation}
+                    className="inline-flex items-center gap-1 text-[11px] font-medium text-[#1D4ED8] hover:underline whitespace-nowrap"
+                  >
+                    <Navigation className="w-3 h-3" />
+                    <span>Use GPS</span>
+                  </button>
+                )}
+              </div>
               <select
-                value={selectedZoneIdx}
-                onChange={(e) => setSelectedZoneIdx(Number(e.target.value))}
+                value={selectedLocationValue}
+                onChange={(e) => setSelectedLocationValue(e.target.value)}
                 className="mt-1 w-full px-3 py-2 text-sm rounded-lg border border-[#D4DBD1] bg-[#F8F9F7] focus:bg-white focus:outline-none focus:border-[#1B6B4A]"
               >
-                {PRIVACY_ZONES.map((z, idx) => (
-                  <option key={z.label} value={idx}>
-                    {z.label}
+                <option value="current-zone">
+                  {liveLocation.isTracking
+                    ? `${areaLabel} · Live GPS Fuzzy Zone (~300m)`
+                    : `${areaLabel} (~300m Fuzzy Zone)`}
+                </option>
+                {preselectedPlace &&
+                  !realPlaces.some((p) => p.id === preselectedPlace.id) && (
+                    <option value={`place:${preselectedPlace.id}`}>
+                      Meetup: {preselectedPlace.name} ({preselectedPlace.distanceKm.toFixed(1)} km)
+                    </option>
+                  )}
+                {realPlaces.slice(0, 12).map((place) => (
+                  <option key={place.id} value={`place:${place.id}`}>
+                    Meetup: {place.name} ({place.distanceKm.toFixed(1)} km)
                   </option>
                 ))}
               </select>
-            </label>
+            </div>
           </div>
+
+          {chosenRealPlace && (
+            <div className="flex items-start gap-2.5 px-3.5 py-2.5 rounded-lg bg-[#1B6B4A]/8 border border-[#1B6B4A]/20 text-xs text-[#13201B]">
+              <MapPin className="w-4 h-4 text-[#1B6B4A] shrink-0 mt-0.5" />
+              <div>
+                <span className="font-semibold">Public Safe Handoff Place:</span>{' '}
+                {chosenRealPlace.name} · {chosenRealPlace.address}
+              </div>
+            </div>
+          )}
 
           <div>
             <div className="flex items-center justify-between gap-2 mb-1.5">
@@ -288,7 +366,9 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
               ) : (
                 <Sparkles className="w-3.5 h-3.5" />
               )}
-              <span>{analyzing ? 'Extracting Structure & Checking Safety...' : 'Analyze & Structure Post'}</span>
+              <span>
+                {analyzing ? 'Extracting Structure & Checking Safety...' : 'Analyze & Structure Post'}
+              </span>
             </button>
           </div>
 
@@ -303,9 +383,7 @@ export const PostComposerModal: React.FC<PostComposerModalProps> = ({
                     {' · '}
                     {draft.timeWindow}
                   </p>
-                  <h3 className="text-base font-semibold text-[#13201B] mt-1">
-                    {draft.title}
-                  </h3>
+                  <h3 className="text-base font-semibold text-[#13201B] mt-1">{draft.title}</h3>
                 </div>
                 {draft.approved ? (
                   <span className="inline-flex items-center gap-1 text-xs font-medium text-[#1B6B4A] whitespace-nowrap">

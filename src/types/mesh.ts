@@ -7,6 +7,29 @@ export interface LatLng {
   lng: number;
 }
 
+export interface RealNearbyPlace {
+  id: string;
+  name: string;
+  category: string;
+  address: string;
+  location: LatLng;
+  distanceKm: number;
+  rating?: number;
+  userRatingCount?: number;
+  googleMapsURI?: string;
+  businessStatus?: string;
+  primaryType?: string;
+}
+
+export interface LiveLocationState {
+  status: 'idle' | 'locating' | 'active' | 'manual' | 'error';
+  isTracking: boolean;
+  coords: LatLng | null;
+  accuracyMeters: number | null;
+  updatedAt: string | null;
+  error: string | null;
+}
+
 export interface MeshItem {
   id: string;
   type: PostType;

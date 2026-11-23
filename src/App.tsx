@@ -1,8 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  Crosshair,
+  Info,
   Loader2,
+  MapPin,
   MessageSquare,
+  Navigation,
   Plus,
   Search,
   ShieldAlert,
@@ -24,11 +28,17 @@ import {
   SUPPORTED_LANGUAGES,
   computeDistanceKm,
 } from './data/initialNeighborhood';
-import { fetchAppConfig, runSemanticMatch } from './services/api';
+import {
+  fetchAppConfig,
+  reverseGeocodeLocation,
+  runSemanticMatch,
+} from './services/api';
 import {
   LatLng,
+  LiveLocationState,
   MeshItem,
   NavSection,
+  RealNearbyPlace,
   SemanticMatchResponse,
 } from './types/mesh';
 
@@ -37,8 +47,6 @@ const STORAGE_KEY = 'neighbormesh_items_v1';
 const DEMO_SEMANTIC_QUERIES = [
   'Need something to reach a high ceiling fan',
   'Kitchen sink faucet is dripping and needs a quick fix',
-  'Help mounting heavy wooden bookshelves into drywall',
-  'Need temporary crutches for a sprained ankle',
 ];
 
 export default function App() {
@@ -61,11 +69,30 @@ export default function App() {
   const [mapsApiKey, setMapsApiKey] = useState<string>('');
   const [quotaExceeded, setQuotaExceeded] = useState(false);
 
+  // Real-time current GPS tracking state (explicit revocable consent)
+  const [liveLocation, setLiveLocation] = useState<LiveLocationState>({
+    status: 'idle',
+    isTracking: false,
+    coords: null,
+    accuracyMeters: null,
+    updatedAt: null,
+    error: null,
+  });
+  const watchIdRef = useRef<number | null>(null);
+  const lastGeocodedCoordsRef = useRef<LatLng | null>(null);
+  const hasLockedFixRef = useRef<boolean>(false);
+
+  // Real nearby Google Maps Places synced from NeighborhoodMap
+  const [realPlaces, setRealPlaces] = useState<RealNearbyPlace[]>([]);
+  const [composerPreselectedPlace, setComposerPreselectedPlace] =
+    useState<RealNearbyPlace | null>(null);
+
   // Workspace states
   const [feedFilter, setFeedFilter] = useState<'all' | 'need' | 'offer' | 'issue'>('all');
   const [emergencyMode, setEmergencyMode] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [showPrototypeNotice, setShowPrototypeNotice] = useState(true);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   // Semantic Matcher states
@@ -96,12 +123,279 @@ export default function App() {
     }
   }, [items]);
 
-  const showToast = (msg: string) => {
+  // Clean up geolocation watch on unmount
+  useEffect(() => {
+    return () => {
+      if (watchIdRef.current !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+    };
+  }, []);
+
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     window.setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 4500);
+  }, []);
+
+  const stopLiveTracking = useCallback(() => {
+    if (watchIdRef.current !== null && navigator.geolocation) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+    hasLockedFixRef.current = false;
+    setLiveLocation((prev) => ({
+      ...prev,
+      status: prev.coords ? 'manual' : 'idle',
+      isTracking: false,
+      error: null,
+    }));
+    showToast('Live GPS location tracking paused.');
+  }, [showToast]);
+
+  const applyResolvedLocation = useCallback(
+    (
+      coords: LatLng,
+      accuracyMeters: number | null,
+      mode: 'active' | 'manual',
+      forceCenter: boolean
+    ) => {
+      const updatedAt = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+
+      hasLockedFixRef.current = true;
+      setLiveLocation({
+        status: mode,
+        isTracking: mode === 'active',
+        coords,
+        accuracyMeters,
+        updatedAt,
+        error: null,
+      });
+
+      const prevGeo = lastGeocodedCoordsRef.current;
+      const movedKm = prevGeo ? computeDistanceKm(prevGeo, coords) : 999;
+      if (forceCenter || movedKm > 0.15) {
+        lastGeocodedCoordsRef.current = coords;
+        setCenter(coords);
+        reverseGeocodeLocation(coords.lat, coords.lng)
+          .then(({ label }) => {
+            setAreaLabel(label);
+            if (forceCenter) {
+              showToast(`Location synced to ${label}.`);
+            }
+          })
+          .catch(() => {
+            const fallback = `Current Location (${coords.lat.toFixed(3)}, ${coords.lng.toFixed(3)})`;
+            setAreaLabel(fallback);
+            if (forceCenter) {
+              showToast('Current coordinates synced.');
+            }
+          });
+      }
+    },
+    [showToast]
+  );
+
+  const formatGeoError = (err: GeolocationPositionError): string => {
+    if (err.code === err.PERMISSION_DENIED) {
+      if (err.message?.toLowerCase().includes('permissions policy')) {
+        return 'Browser preview restricted automatic GPS access. Click "Set on Map" or search your neighborhood in the map bar to set your location.';
+      }
+      return 'Location access was blocked by your browser. Allow location permission in browser settings, or click "Set on Map" to pin your neighborhood.';
+    }
+    if (err.code === err.POSITION_UNAVAILABLE) {
+      return 'Device location signal is currently unavailable. Check OS location services or use "Set on Map" / neighborhood search.';
+    }
+    if (err.code === err.TIMEOUT) {
+      return 'Location request timed out. Try again or use "Set on Map" / neighborhood search.';
+    }
+    return err.message || 'Could not determine your current location.';
   };
+
+  const startLiveTracking = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLiveLocation((prev) => ({
+        ...prev,
+        status: 'error',
+        isTracking: false,
+        error: 'Geolocation is not supported in this browser. Use "Set on Map" or search your neighborhood instead.',
+      }));
+      return;
+    }
+
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+
+    // Reset cached geocode point so clicking "Use Live Location" always recenters immediately
+    lastGeocodedCoordsRef.current = null;
+    hasLockedFixRef.current = false;
+
+    setLiveLocation((prev) => ({
+      ...prev,
+      status: 'locating',
+      isTracking: false,
+      error: null,
+    }));
+
+    const beginWatch = () => {
+      watchIdRef.current = navigator.geolocation.watchPosition(
+        (pos) => {
+          applyResolvedLocation(
+            { lat: pos.coords.latitude, lng: pos.coords.longitude },
+            pos.coords.accuracy,
+            'active',
+            !hasLockedFixRef.current
+          );
+        },
+        (err) => {
+          // Ignore transient watch timeouts once we already have a locked GPS fix
+          if (hasLockedFixRef.current && err.code === err.TIMEOUT) {
+            return;
+          }
+          if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+            watchIdRef.current = null;
+          }
+          setLiveLocation((prev) => ({
+            ...prev,
+            status: prev.coords ? 'manual' : 'error',
+            isTracking: false,
+            error: formatGeoError(err),
+          }));
+        },
+        {
+          enableHighAccuracy: false,
+          maximumAge: 20000,
+          timeout: 25000,
+        }
+      );
+    };
+
+    // Step 1: Fast network/Wi-Fi/GPS initial fix (works reliably on desktop + mobile)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        applyResolvedLocation(
+          { lat: pos.coords.latitude, lng: pos.coords.longitude },
+          pos.coords.accuracy,
+          'active',
+          true
+        );
+        beginWatch();
+      },
+      (firstErr) => {
+        if (firstErr.code === firstErr.PERMISSION_DENIED) {
+          setLiveLocation((prev) => ({
+            ...prev,
+            status: 'error',
+            isTracking: false,
+            error: formatGeoError(firstErr),
+          }));
+          return;
+        }
+        // Retry once with cached/relaxed position before failing
+        navigator.geolocation.getCurrentPosition(
+          (pos) => {
+            applyResolvedLocation(
+              { lat: pos.coords.latitude, lng: pos.coords.longitude },
+              pos.coords.accuracy,
+              'active',
+              true
+            );
+            beginWatch();
+          },
+          (retryErr) => {
+            setLiveLocation((prev) => ({
+              ...prev,
+              status: 'error',
+              isTracking: false,
+              error: formatGeoError(retryErr),
+            }));
+          },
+          {
+            enableHighAccuracy: false,
+            maximumAge: Infinity,
+            timeout: 15000,
+          }
+        );
+      },
+      {
+        enableHighAccuracy: false,
+        maximumAge: 60000,
+        timeout: 10000,
+      }
+    );
+  }, [applyResolvedLocation]);
+
+  const handleSetManualLocation = useCallback(
+    (coords: LatLng) => {
+      if (watchIdRef.current !== null && navigator.geolocation) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+      lastGeocodedCoordsRef.current = null;
+      applyResolvedLocation(coords, 35, 'manual', true);
+    },
+    [applyResolvedLocation]
+  );
+
+  const handleRealPlacesLoaded = useCallback((places: RealNearbyPlace[]) => {
+    setRealPlaces(places);
+    // If reverse-geocode fell back to raw coordinates, enrich areaLabel from verified Google Place address
+    if (places.length > 0) {
+      setAreaLabel((prevLabel) => {
+        if (
+          !prevLabel.startsWith('Current Location (') &&
+          !prevLabel.startsWith('Map Area (')
+        ) {
+          return prevLabel;
+        }
+        const addr = places[0].address;
+        const segments = addr
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (segments.length >= 3) {
+          return `${segments[segments.length - 3]}, ${segments[segments.length - 2].replace(/\s+\d[\d-]*$/, '')}`;
+        }
+        if (segments.length === 2) {
+          return segments[0];
+        }
+        return prevLabel;
+      });
+    }
+  }, []);
+
+  const handleToggleLiveTracking = useCallback(() => {
+    if (liveLocation.status === 'active') {
+      stopLiveTracking();
+    } else if (liveLocation.status !== 'locating') {
+      startLiveTracking();
+    }
+  }, [liveLocation.status, startLiveTracking, stopLiveTracking]);
+
+  const handleManualCenterChange = useCallback(
+    (newCenter: LatLng, label: string) => {
+      setCenter(newCenter);
+      setAreaLabel(label);
+      // If user manually picks another neighborhood via Autocomplete or pan, resolve clean label if coordinate fallback
+      if (label.startsWith('Map Area (')) {
+        reverseGeocodeLocation(newCenter.lat, newCenter.lng)
+          .then(({ label: resolved }) => setAreaLabel(resolved))
+          .catch(() => {
+            // keep coordinate label
+          });
+      }
+      showToast(`Real-time map updated to ${label}.`);
+    },
+    [showToast]
+  );
 
   const handleSemanticSearch = async (queryOverride?: string) => {
     const q = (queryOverride ?? matchQuery).trim();
@@ -140,6 +434,7 @@ export default function App() {
 
   const handlePublishItem = (newItem: MeshItem, autoMatchQuery?: string) => {
     setItems((prev) => [newItem, ...prev]);
+    setComposerPreselectedPlace(null);
     showToast(`Published "${newItem.title}" to ${newItem.zoneLabel}.`);
     if (autoMatchQuery) {
       handleSemanticSearch(autoMatchQuery);
@@ -180,6 +475,11 @@ export default function App() {
     setActiveNav('map');
   };
 
+  const handlePostWithPlace = (place: RealNearbyPlace) => {
+    setComposerPreselectedPlace(place);
+    setComposerOpen(true);
+  };
+
   const filteredFeedItems = useMemo(() => {
     return items.filter((item) => {
       if (emergencyMode && !item.isEmergencyRelevant && item.urgency !== 'critical') {
@@ -216,16 +516,30 @@ export default function App() {
       );
   }, [matchResult, items]);
 
-  // Compact context snapshot passed to the multi-turn Coordinator Chatbot
+  // Compact context snapshot passed to the multi-turn Coordinator Chatbot (includes live location + real nearby places)
   const communityContext = useMemo(() => {
-    return items
-      .slice(0, 14)
+    const neighborLines = items
+      .slice(0, 12)
       .map(
         (i) =>
           `[${i.type.toUpperCase()}] ${i.title} by ${i.authorName} (${i.zoneLabel}, ${i.availability}) — ${i.description}`
       )
       .join('\n');
-  }, [items]);
+
+    const placeLines = realPlaces
+      .slice(0, 8)
+      .map(
+        (p) =>
+          `- ${p.name} (${p.category}, ${p.distanceKm.toFixed(2)} km, ${p.address})`
+      )
+      .join('\n');
+
+    return `Active Neighborhood: ${areaLabel} (${center.lat.toFixed(4)}, ${center.lng.toFixed(4)})${
+      liveLocation.isTracking ? ' [Live GPS Active]' : ''
+    }\n\nNeighbor Listings:\n${neighborLines}${
+      placeLines ? `\n\nReal Nearby Public Places (Google Maps):\n${placeLines}` : ''
+    }`;
+  }, [items, realPlaces, areaLabel, center.lat, center.lng, liveLocation.isTracking]);
 
   const offersCount = items.filter((i) => i.type === 'offer').length;
   const issuesCount = items.filter((i) => i.type === 'issue').length;
@@ -295,7 +609,10 @@ export default function App() {
           <div className="flex items-center shrink-0">
             <button
               type="button"
-              onClick={() => setComposerOpen(true)}
+              onClick={() => {
+                setComposerPreselectedPlace(null);
+                setComposerOpen(true);
+              }}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-[#1B6B4A] text-white hover:bg-[#145339] transition-colors whitespace-nowrap shrink-0 min-h-[38px]"
             >
               <Plus className="w-3.5 h-3.5" />
@@ -329,6 +646,32 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Concept Prototype & API Notice */}
+      {showPrototypeNotice && (
+        <div
+          role="note"
+          className="bg-[#FEF9EE] border-b border-[#F2DFB6] text-[#78490A] px-4 py-2.5"
+        >
+          <div className="max-w-7xl mx-auto px-0 sm:px-2 lg:px-4 flex items-start sm:items-center justify-between gap-3 text-xs leading-relaxed">
+            <div className="flex items-start sm:items-center gap-2">
+              <Info className="w-4 h-4 shrink-0 text-[#B45309] mt-0.5 sm:mt-0" />
+              <span>
+                <strong className="font-semibold text-[#5C3606]">Concept Prototype Only:</strong>{' '}
+                NeighborMesh is only an idea preview and not a complete app, so some AI features may not work due to API charges.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPrototypeNotice(false)}
+              className="text-[#92580C] hover:text-[#5C3606] p-0.5 rounded transition-colors shrink-0"
+              aria-label="Dismiss concept prototype notice"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Active Rapid Coordination Notice */}
       {emergencyMode && (
@@ -370,6 +713,95 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
         {activeNav === 'feed' && (
           <>
+            {/* Live Current Location & Real Places Context Bar */}
+            <section className="bg-white border border-[#E4E7E2] rounded-xl px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
+                <span className="inline-flex items-center gap-1.5 font-semibold text-[#13201B]">
+                  {liveLocation.isTracking ? (
+                    <Crosshair className="w-3.5 h-3.5 text-[#1D4ED8]" />
+                  ) : (
+                    <MapPin className="w-3.5 h-3.5 text-[#1B6B4A]" />
+                  )}
+                  <span>{areaLabel}</span>
+                </span>
+                <span aria-hidden="true" className="text-[#52605A]">
+                  ·
+                </span>
+                <span className="font-mono tabular-nums text-[#52605A]">
+                  {center.lat.toFixed(4)}, {center.lng.toFixed(4)}
+                </span>
+                {liveLocation.isTracking && liveLocation.updatedAt && (
+                  <>
+                    <span aria-hidden="true" className="text-[#52605A]">
+                      ·
+                    </span>
+                    <span className="text-[#1D4ED8] font-medium">
+                      Live GPS synced {liveLocation.updatedAt}
+                    </span>
+                  </>
+                )}
+                {realPlaces.length > 0 && (
+                  <>
+                    <span aria-hidden="true" className="text-[#52605A]">
+                      ·
+                    </span>
+                    <span className="text-[#1B6B4A] font-medium font-mono tabular-nums">
+                      {realPlaces.length} real nearby places loaded
+                    </span>
+                  </>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleToggleLiveTracking}
+                  disabled={liveLocation.status === 'locating'}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                    liveLocation.status === 'active'
+                      ? 'bg-[#1D4ED8] text-white hover:bg-[#1E40AF]'
+                      : liveLocation.status === 'locating'
+                        ? 'bg-[#EEF1EC] text-[#52605A] cursor-wait'
+                        : 'border border-[#D4DBD1] bg-[#F8F9F7] text-[#13201B] hover:bg-[#EEF1EC]'
+                  }`}
+                >
+                  {liveLocation.status === 'locating' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1B6B4A]" />
+                  ) : (
+                    <Navigation className="w-3.5 h-3.5" />
+                  )}
+                  <span>
+                    {liveLocation.status === 'locating'
+                      ? 'Locating...'
+                      : liveLocation.status === 'active'
+                        ? 'Live GPS: On'
+                        : 'Use Current Location'}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveNav('map')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-[#D4DBD1] bg-white text-[#13201B] hover:bg-[#F1F4EF] transition-colors whitespace-nowrap"
+                >
+                  <MapPin className="w-3.5 h-3.5 text-[#1B6B4A]" />
+                  <span>Explore Live Map &amp; Places</span>
+                </button>
+              </div>
+            </section>
+
+            {liveLocation.error && (
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#B45309] bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5">
+                <span>{liveLocation.error}</span>
+                <button
+                  type="button"
+                  onClick={() => setActiveNav('map')}
+                  className="font-semibold text-[#13201B] underline whitespace-nowrap"
+                >
+                  Open Map to Pick Location
+                </button>
+              </div>
+            )}
+
             {/* Editorial 2-Column Hero Split */}
             <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
               <div className="lg:col-span-7 bg-white border border-[#E4E7E2] rounded-xl p-6 sm:p-8 flex flex-col justify-between space-y-6">
@@ -381,7 +813,7 @@ export default function App() {
                     Turn neighborhood chatter into local mutual aid.
                   </h1>
                   <p className="text-sm sm:text-base text-[#52605A] leading-relaxed max-w-xl">
-                    Describe a household need in plain language or by voice. NeighborMesh matches your intent with nearby tools, skills, and volunteers—using fuzzy proximity zones to protect everyone&apos;s address.
+                    Describe a household need in plain language or by voice. NeighborMesh matches your intent with nearby tools, skills, and real community hubs around your live location.
                   </p>
                 </div>
 
@@ -427,7 +859,7 @@ export default function App() {
 
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="text-[#52605A]">Try semantic matching:</span>
-                    {DEMO_SEMANTIC_QUERIES.slice(0, 2).map((q) => (
+                    {DEMO_SEMANTIC_QUERIES.map((q) => (
                       <button
                         key={q}
                         type="button"
@@ -450,12 +882,12 @@ export default function App() {
               <div className="lg:col-span-5 relative rounded-xl overflow-hidden border border-[#E4E7E2] min-h-[260px]">
                 <ResilientImage
                   src={HERO_COMMUNITY_IMAGE}
-                  alt="Oakwood neighborhood community library and wooden tool-sharing shed at golden hour"
+                  alt="Neighborhood community library and wooden tool-sharing shed at golden hour"
                   className="w-full h-full lg:h-full object-cover"
                 />
                 <div className="absolute inset-0 bg-gradient-to-t from-[#13201B]/85 via-[#13201B]/25 to-transparent flex flex-col justify-end p-6 text-white">
                   <p className="text-xs text-white/80">
-                    Oakwood Tool Library &amp; Block Network
+                    {areaLabel} · Tool Library &amp; Block Network
                   </p>
                   <p className="text-sm sm:text-base font-medium leading-snug mt-1">
                     Shared ladders, drills, mobility aids, and neighbor skills—searchable across {SUPPORTED_LANGUAGES.length} languages.
@@ -597,7 +1029,9 @@ export default function App() {
                     }`}
                   >
                     <AlertTriangle className="w-3.5 h-3.5" />
-                    <span>{emergencyMode ? 'Rapid Coordination: On' : 'Rapid Coordination Mode'}</span>
+                    <span>
+                      {emergencyMode ? 'Rapid Coordination: On' : 'Rapid Coordination Mode'}
+                    </span>
                   </button>
 
                   <button
@@ -672,11 +1106,7 @@ export default function App() {
           <NeighborhoodMap
             apiKey={mapsApiKey}
             center={center}
-            onCenterChange={(newCenter, label) => {
-              setCenter(newCenter);
-              setAreaLabel(label);
-              showToast(`Recentered proximity map on ${label}.`);
-            }}
+            onCenterChange={handleManualCenterChange}
             areaLabel={areaLabel}
             items={items}
             onSelectItem={(item) => {
@@ -685,6 +1115,12 @@ export default function App() {
               setFeedFilter('all');
             }}
             emergencyMode={emergencyMode}
+            liveLocation={liveLocation}
+            onToggleLiveTracking={handleToggleLiveTracking}
+            onSetManualLocation={handleSetManualLocation}
+            realPlaces={realPlaces}
+            onRealPlacesLoaded={handleRealPlacesLoaded}
+            onPostWithPlace={handlePostWithPlace}
           />
         )}
 
@@ -704,10 +1140,15 @@ export default function App() {
       {/* Quiet Civic Footer */}
       <footer className="border-t border-[#E4E7E2] bg-white mt-12">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-[#52605A]">
-          <div>
-            <span className="font-semibold text-[#13201B]">NeighborMesh</span>
-            <span aria-hidden="true"> · </span>
-            <span>Hyper-local mutual aid &amp; community resource coordination</span>
+          <div className="space-y-1">
+            <div>
+              <span className="font-semibold text-[#13201B]">NeighborMesh</span>
+              <span aria-hidden="true"> · </span>
+              <span>Hyper-local mutual aid &amp; community resource coordination</span>
+            </div>
+            <p className="text-[11px] text-[#78490A]">
+              Concept prototype only — not a complete app; some AI features may not work due to API charges.
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-4">
             <span>Fuzzy radius privacy zones active</span>
@@ -727,8 +1168,17 @@ export default function App() {
       {/* Modals & Floating Coordinator Chatbot */}
       <PostComposerModal
         isOpen={composerOpen}
-        onClose={() => setComposerOpen(false)}
+        onClose={() => {
+          setComposerOpen(false);
+          setComposerPreselectedPlace(null);
+        }}
         onPublish={handlePublishItem}
+        center={center}
+        areaLabel={areaLabel}
+        liveLocation={liveLocation}
+        onEnableLiveLocation={startLiveTracking}
+        realPlaces={realPlaces}
+        preselectedPlace={composerPreselectedPlace}
       />
 
       <CoordinatorChat

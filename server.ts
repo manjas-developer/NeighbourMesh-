@@ -112,6 +112,102 @@ async function startServer() {
     res.json({ googleMapsApiKey });
   });
 
+  // Server-side Reverse Geocoding (Geocoding REST API — avoids browser CORS and legacy JS Geocoder)
+  app.get('/api/maps/reverse-geocode', async (req: Request, res: Response) => {
+    try {
+      const lat = Number(req.query.lat);
+      const lng = Number(req.query.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        res.status(400).json({ error: 'Valid lat and lng query parameters are required.' });
+        return;
+      }
+
+      const mapsKey =
+        process.env.VITE_GOOGLE_MAPS_API_KEY ||
+        process.env.GOOGLE_MAPS_API_KEY ||
+        '';
+
+      if (!mapsKey) {
+        res.json({
+          label: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+          formattedAddress: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+        });
+        return;
+      }
+
+      const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${encodeURIComponent(
+        `${lat},${lng}`
+      )}&key=${encodeURIComponent(mapsKey)}`;
+
+      const referer =
+        (typeof req.headers.referer === 'string' && req.headers.referer) ||
+        (typeof req.headers.origin === 'string' && req.headers.origin) ||
+        process.env.APP_URL ||
+        '';
+
+      const geoRes = await fetch(url, {
+        headers: referer ? { Referer: referer } : undefined,
+      });
+      if (geoRes.status === 429) {
+        res.status(429).json({ error: 'RESOURCE_EXHAUSTED: Google Maps Geocoding quota reached.' });
+        return;
+      }
+      const data = (await geoRes.json()) as {
+        status?: string;
+        error_message?: string;
+        results?: Array<{
+          formatted_address?: string;
+          address_components?: Array<{
+            long_name: string;
+            short_name: string;
+            types: string[];
+          }>;
+        }>;
+      };
+
+      if (data.status === 'OVER_QUERY_LIMIT') {
+        res.status(429).json({ error: 'RESOURCE_EXHAUSTED: Google Maps Geocoding quota reached.' });
+        return;
+      }
+
+      const first = data.status === 'OK' ? data.results?.[0] : undefined;
+      if (!first) {
+        res.json({
+          label: `Current Location (${lat.toFixed(3)}, ${lng.toFixed(3)})`,
+          formattedAddress: `${lat.toFixed(4)}, ${lng.toFixed(4)}`,
+          fallbackNeeded: true,
+        });
+        return;
+      }
+
+      const comps = first.address_components ?? [];
+      const findComp = (type: string) =>
+        comps.find((c) => c.types.includes(type))?.long_name;
+
+      const neighborhood =
+        findComp('neighborhood') ||
+        findComp('sublocality_level_1') ||
+        findComp('sublocality');
+      const locality =
+        findComp('locality') || findComp('administrative_area_level_2');
+      const region = findComp('administrative_area_level_1');
+
+      const labelParts = [neighborhood, locality].filter(Boolean);
+      const label =
+        labelParts.length > 0
+          ? labelParts.join(', ')
+          : locality || region || first.formatted_address || 'Current Location';
+
+      res.json({
+        label,
+        formattedAddress: first.formatted_address || label,
+        fallbackNeeded: false,
+      });
+    } catch (err) {
+      handleApiError(res, err, 'Unable to resolve location name.');
+    }
+  });
+
   // 1. Audio Transcription using gemini-3.5-transcribe
   app.post('/api/ai/transcribe', async (req: Request, res: Response) => {
     try {
