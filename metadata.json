@@ -1,0 +1,6 @@
+{
+  "name": "NeighborMesh",
+  "description": "Hyper-local AI mutual aid platform matching neighborhood needs with nearby shared tools, skills, multilingual threads, and triaged community issues.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
