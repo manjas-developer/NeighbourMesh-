@@ -1,9 +1,14 @@
-import type {
-  ExtractApiResponse,
-  LanguageOption,
-  MatchApiResponse,
-  TriageApiResponse,
-} from '../types';
+import {
+  BatchOnboardItem,
+  ChatMode,
+  LatLng,
+  MapSource,
+  MeshItem,
+  SemanticMatchResponse,
+  StructuredPostDraft,
+  TriageReport,
+  WebSource,
+} from '../types/mesh';
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
@@ -11,67 +16,108 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-
-  const data = (await res.json().catch(() => ({}))) as { error?: string } & T;
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.error || `Request failed (${res.status}). Please try again.`);
+    throw new Error(
+      (data as { error?: string }).error || `Request failed with status ${res.status}`
+    );
   }
-  return data;
+  return data as T;
 }
 
-export interface CatalogMatchPayload {
-  id: string;
-  title: string;
-  category: string;
-  description: string;
-  zoneName: string;
-  distanceKm: number;
-  availability: string;
-  isHub: boolean;
+export async function fetchAppConfig(): Promise<{ googleMapsApiKey: string }> {
+  const envKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined;
+  if (envKey) {
+    return { googleMapsApiKey: envKey };
+  }
+  const res = await fetch('/api/config');
+  if (!res.ok) {
+    return { googleMapsApiKey: '' };
+  }
+  return (await res.json()) as { googleMapsApiKey: string };
 }
 
-export function requestSemanticMatch(payload: {
-  query: string;
-  userZoneName: string;
-  radiusKm: number;
-  minConfidence: number;
-  catalog: CatalogMatchPayload[];
-}): Promise<MatchApiResponse> {
-  return postJson<MatchApiResponse>('/api/match', payload);
+export async function transcribeAudio(
+  audioBase64: string,
+  mimeType: string
+): Promise<{ transcript: string }> {
+  return postJson('/api/ai/transcribe', { audioBase64, mimeType });
 }
 
-export function requestListingExtraction(payload: {
-  paragraph?: string;
-  zoneName: string;
-  imageBase64?: string;
-  imageMimeType?: string;
-}): Promise<ExtractApiResponse> {
-  return postJson<ExtractApiResponse>('/api/extract', payload);
-}
-
-export function requestPulseTriage(payload: {
-  rawChat?: string;
-  zoneName: string;
-  imageBase64?: string;
-  imageMimeType?: string;
-}): Promise<TriageApiResponse> {
-  return postJson<TriageApiResponse>('/api/triage', payload);
-}
-
-export function requestTranslation(payload: {
+export async function structurePost(payload: {
   text: string;
-  targetLanguage: LanguageOption;
-}): Promise<{ detectedLanguage: string; translatedText: string }> {
-  return postJson<{ detectedLanguage: string; translatedText: string }>('/api/translate', payload);
+  imageBase64?: string;
+  imageMimeType?: string;
+}): Promise<StructuredPostDraft> {
+  return postJson('/api/ai/structure-post', payload);
 }
 
-export function requestSmsBridge(payload: {
+export async function runSemanticMatch(
+  query: string,
+  listings: Array<{
+    id: string;
+    title: string;
+    description: string;
+    category: string;
+    type: string;
+    zoneLabel: string;
+    distanceKm?: number;
+    tags: string[];
+    authorName: string;
+    availability: string;
+  }>
+): Promise<SemanticMatchResponse> {
+  return postJson('/api/ai/semantic-match', { query, listings });
+}
+
+export async function batchOnboard(payload: {
+  paragraph: string;
+  authorName: string;
+  zoneLabel: string;
+}): Promise<{ items: BatchOnboardItem[] }> {
+  return postJson('/api/ai/batch-onboard', payload);
+}
+
+export async function translateText(
+  text: string,
+  targetLanguage: string
+): Promise<{ translatedText: string }> {
+  return postJson('/api/ai/translate', { text, targetLanguage });
+}
+
+export async function triagePulse(issues: MeshItem[]): Promise<TriageReport> {
+  return postJson('/api/ai/triage-pulse', {
+    issues: issues.map((i) => ({
+      id: i.id,
+      title: i.title,
+      description: i.description,
+      zoneLabel: i.zoneLabel,
+      urgency: i.urgency,
+      reportsCount: i.reportsCount ?? 1,
+    })),
+  });
+}
+
+export async function searchNearbyHubs(
+  query: string,
+  location: LatLng
+): Promise<{ text: string; mapSources: MapSource[] }> {
+  return postJson('/api/ai/nearby-hubs', { query, location });
+}
+
+export async function runCivicSearch(
+  query: string,
+  areaName?: string
+): Promise<{ text: string; webSources: WebSource[] }> {
+  return postJson('/api/ai/civic-search', { query, areaName });
+}
+
+export async function sendChatMessage(payload: {
+  history: Array<{ role: 'user' | 'model'; text: string }>;
   message: string;
-  catalog: CatalogMatchPayload[];
-  emergencyAlerts: Array<{ title: string; zoneName: string; action: string }>;
-}): Promise<{ parsedIntent: string; smsReply: string; matchedZone: string }> {
-  return postJson<{ parsedIntent: string; smsReply: string; matchedZone: string }>(
-    '/api/sms-bridge',
-    payload
-  );
+  mode: ChatMode;
+  location: LatLng;
+  communityContext: string;
+}): Promise<{ text: string; mapSources: MapSource[]; webSources: WebSource[] }> {
+  return postJson('/api/ai/chat', payload);
 }

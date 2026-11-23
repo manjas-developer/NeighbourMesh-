@@ -1,17 +1,17 @@
 @import "tailwindcss";
 
 @theme {
-  --font-display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  --font-sans: "DM Sans", system-ui, -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
 @layer base {
   html {
     font-family: var(--font-sans);
+    color: #13201b;
+    background-color: #f8f9f7;
     scroll-behavior: smooth;
-    background-color: #f8fafc;
-    color: #0f172a;
   }
 
   h1,
@@ -25,14 +25,44 @@
   button,
   a,
   input,
-  select,
-  textarea {
+  textarea,
+  select {
     transition-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
   }
 }
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Markdown prose polish inside AI responses */
+.nm-prose p {
+  margin-bottom: 0.625rem;
+  line-height: 1.6;
+}
+.nm-prose p:last-child {
+  margin-bottom: 0;
+}
+.nm-prose ul,
+.nm-prose ol {
+  margin: 0.5rem 0 0.625rem 1.25rem;
+  list-style-type: disc;
+}
+.nm-prose ol {
+  list-style-type: decimal;
+}
+.nm-prose li {
+  margin-bottom: 0.25rem;
+  line-height: 1.55;
+}
+.nm-prose strong {
+  font-weight: 600;
+  color: #13201b;
+}
+.nm-prose a {
+  color: #1b6b4a;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -42,6 +72,5 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
   }
 }
